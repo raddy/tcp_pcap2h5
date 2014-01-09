@@ -18,6 +18,7 @@ cdef extern from * nogil:
     
 cdef extern from "string.h" nogil:
     void *memcpy  (void *TO, const_void *FROM, size_t SIZE)
+    void *memset  (void *BLOCK, int C, size_t SIZE)
 
 cdef extern from "time.h" nogil:
     ctypedef long time_t
@@ -49,12 +50,17 @@ cdef extern from "netinet/ip.h" nogil:
         
 cdef extern from "arpa/inet.h" nogil:
     int ntohs (int)
+    int ntohl (int)
     char* inet_ntoa(in_addr)
 
 cdef extern from "netinet/tcp.h" nogil:
+    ctypedef unsigned int tcp_seq
     struct tcphdr:
         unsigned short th_sport
         unsigned short th_dport
+        tcp_seq th_seq
+        tcp_seq th_ack
+        unsigned int th_off
 
 cdef packed struct tcp_packed:
         int64_t packet_time
@@ -62,8 +68,11 @@ cdef packed struct tcp_packed:
         int64_t dest_port
         char dest_ip[16]
         int64_t source_port
-        char pkt_data[100]
-        int64_t frame_len 
+        char pkt_data[1500]
+        int64_t frame_len
+        int64_t header_len
+        int64_t seq
+        int64_t ack 
     
 #let's just ignore non-udp for now
 @cython.cdivision(True)
@@ -86,7 +95,8 @@ def open_pcap(some_pcap):
         
         np.ndarray packet_info = np.ndarray((MAX_SIZE,),
             dtype=[('packet_time','i8'),('source_ip','a16'), ('dest_port','i8'),
-                   ('dest_ip','a16'),('source_port','i8'),('pkt_data','a100'),('frame_len','i8')])
+                   ('dest_ip','a16'),('source_port','i8'),('pkt_data','a1500'),
+                   ('frame_len','i8'),('header_len','i8'),('seq','i8'),('ack','i8')])
         tcp_packed [:] packet_view = packet_info
     #set up hdfstore
     h5_filename = some_pcap.split('/')[-1]+'.h5'
@@ -109,24 +119,33 @@ def open_pcap(some_pcap):
             tcpHdr = (<tcphdr *> (<char *>ip_hdr + ip_hdr_len))
             data = ((<char *> tcpHdr) + sizeof(tcphdr))
             data_len = (packet_length - sizeof(tcphdr) - ip_hdr_len)
-            if data_len>100:
-                data_len = 100
+
+            if data_len>1500:
+                data_len = 1500
             data[data_len] = 0
             # *** General Packet Info *** 
             packet_view[pkt_counter].packet_time = header.ts.tv_sec * 1000000000 +header.ts.tv_usec*1000 + KST_TZ_OFFSET
-            packet_view[pkt_counter].source_port = tcpHdr.th_sport
-            packet_view[pkt_counter].dest_port = tcpHdr.th_dport
+            packet_view[pkt_counter].source_port = ntohs(tcpHdr.th_sport)
+            packet_view[pkt_counter].dest_port = ntohs(tcpHdr.th_dport)
             packet_view[pkt_counter].frame_len = packet_length
+            packet_view[pkt_counter].header_len = int(tcpHdr.th_off<<2) + ip_hdr_len
+            packet_view[pkt_counter].seq = ntohl(tcpHdr.th_seq) 
+            packet_view[pkt_counter].ack = ntohl(tcpHdr.th_ack) 
             #copy ip info in (clunky)
             s = inet_ntoa(ip_hdr.ip_src)
+            memset(packet_view[pkt_counter].source_ip, '\0', 16)
             memcpy(packet_view[pkt_counter].source_ip,s,strlen(s))
             packet_view[pkt_counter].source_ip[strlen(s)] = 0
             s = inet_ntoa(ip_hdr.ip_dst)
+            memset(packet_view[pkt_counter].dest_ip, '\0', 16)
             memcpy(packet_view[pkt_counter].dest_ip,s,strlen(s))
             packet_view[pkt_counter].dest_ip[strlen(s)] = 0
             #end of ip info
             # *** End of General Packet Info
-            memcpy(packet_view[pkt_counter].pkt_data,data,strlen(data))
+            if packet_length>60:
+                memcpy(packet_view[pkt_counter].pkt_data,data,data_len)
+            else:
+                memset(packet_view[pkt_counter].pkt_data, '\0', 1500)
             pkt_counter+=1
         if pkt_counter == MAX_SIZE:
             df = pd.DataFrame(packet_info)
@@ -137,6 +156,7 @@ def open_pcap(some_pcap):
     df = pd.DataFrame(packet_info[:pkt_counter])
     df.index = df.packet_time.values
     del df['packet_time']
-    store.append('pcap_data',df,data_columns=['symbol'])
+    store.append('pcap_data',df)
+    print 'Number tcp packets saved: ',len(df)
     pcap_close(handle)
     store.close()
