@@ -56,11 +56,11 @@ cdef extern from "arpa/inet.h" nogil:
 cdef extern from "netinet/tcp.h" nogil:
     ctypedef unsigned int tcp_seq
     struct tcphdr:
-        unsigned short th_sport
-        unsigned short th_dport
-        tcp_seq th_seq
-        tcp_seq th_ack
-        unsigned int th_off
+        unsigned short source
+        unsigned short dest
+        tcp_seq seq
+        tcp_seq ack_seq
+        unsigned int doff
 
 cdef packed struct tcp_packed:
         int64_t packet_time
@@ -125,12 +125,12 @@ def open_pcap(some_pcap):
             data[data_len] = 0
             # *** General Packet Info *** 
             packet_view[pkt_counter].packet_time = header.ts.tv_sec * 1000000000 +header.ts.tv_usec*1000 + KST_TZ_OFFSET
-            packet_view[pkt_counter].source_port = ntohs(tcpHdr.th_sport)
-            packet_view[pkt_counter].dest_port = ntohs(tcpHdr.th_dport)
+            packet_view[pkt_counter].source_port = ntohs(tcpHdr.source)
+            packet_view[pkt_counter].dest_port = ntohs(tcpHdr.dest)
             packet_view[pkt_counter].frame_len = packet_length
-            packet_view[pkt_counter].header_len = int(tcpHdr.th_off<<2) + ip_hdr_len
-            packet_view[pkt_counter].seq = ntohl(tcpHdr.th_seq) 
-            packet_view[pkt_counter].ack = ntohl(tcpHdr.th_ack) 
+            packet_view[pkt_counter].header_len = int(tcpHdr.doff<<2) + ip_hdr_len
+            packet_view[pkt_counter].seq = ntohl(tcpHdr.seq) 
+            packet_view[pkt_counter].ack = ntohl(tcpHdr.ack_seq) 
             #copy ip info in (clunky)
             s = inet_ntoa(ip_hdr.ip_src)
             memset(packet_view[pkt_counter].source_ip, '\0', 16)
