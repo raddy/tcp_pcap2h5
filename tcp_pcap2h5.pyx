@@ -11,6 +11,8 @@ ctypedef np.double_t DTYPE_t
 cdef extern from "stdint.h" nogil:
     ctypedef   signed long  int64_t #pytables doesn't like unsigned ints apparently
     ctypedef unsigned short uint16_t
+    ctypedef unsigned int uint8_t
+    ctypedef unsigned int uint32_t
     
 cdef extern from * nogil:
     ctypedef char const_char "const char"
@@ -73,6 +75,14 @@ cdef packed struct tcp_packed:
         int64_t header_len
         int64_t seq
         int64_t ack 
+        int64_t sack1_le 
+        int64_t sack1_re 
+
+ctypedef struct tcp_option_t:
+    uint8_t kind
+    uint8_t size       
+
+
     
 #let's just ignore non-udp for now
 @cython.cdivision(True)
@@ -87,16 +97,21 @@ def open_pcap(some_pcap):
         unsigned char* pkt_ptr
         ip *ip_hdr
         tcphdr *tcpHdr
+        uint8_t* opt
+        tcp_option_t* _opt 
         char *data
         char *s
-        int data_len, ip_hdr_len, ether_type, ether_offset, pkt_counter=0,packet_length,flag
+        int data_len, ip_hdr_len, ether_type, ether_offset, data_offset,
+        int opt_offset,pkt_counter=0,packet_length,flag,opt_counter=0
+        int sack_size,sack_counter=0
         DEF MAX_SIZE  = 500000
         long KST_TZ_OFFSET = 9 * 60 * 60 * 1000 * 1000 * 1000
         
         np.ndarray packet_info = np.ndarray((MAX_SIZE,),
             dtype=[('packet_time','i8'),('source_ip','a16'), ('dest_port','i8'),
                    ('dest_ip','a16'),('source_port','i8'),('pkt_data','a1500'),
-                   ('frame_len','i8'),('header_len','i8'),('seq','i8'),('ack','i8')])
+                   ('frame_len','i8'),('header_len','i8'),('seq','i8'),('ack','i8'),
+                   ('sack1_le','i8'),('sack1_re','i8')])
         tcp_packed [:] packet_view = packet_info
     #set up hdfstore
     h5_filename = some_pcap.split('/')[-1]+'.h5'
@@ -117,8 +132,36 @@ def open_pcap(some_pcap):
         if ip_hdr.ip_p == 6: #TCP == 6 bro
             ip_hdr_len = ip_hdr.ip_hl*4 #is this always 20 bytes since we're v4?
             tcpHdr = (<tcphdr *> (<char *>ip_hdr + ip_hdr_len))
-            data = ((<char *> tcpHdr) + sizeof(tcphdr))
-            data_len = (packet_length - sizeof(tcphdr) - ip_hdr_len)
+            
+            #tcp options handling
+            opt_offset = ip_hdr_len + ether_offset + sizeof(tcphdr)
+            data_offset = ether_offset + ip_hdr_len + int(tcpHdr.th_off<<2)
+
+            if opt_offset < data_offset:
+                opt_counter = 0
+                opt = <uint8_t*>(packet + opt_offset)
+                while (opt_offset+opt_counter<data_offset) and opt[0] != 0:
+                    _opt = <tcp_option_t*>opt
+                    if <int>_opt.kind == 1:
+                        opt+=1 #move pointer up 1 byte?
+                        opt_counter+=1
+                        continue
+                    if <int>_opt.kind == 5:
+                        sack_size = <int>_opt.size
+                        sack_counter = 2
+                        sacks = []
+                        while sack_counter<sack_size:
+                            sacks.append(ntohl(<uint32_t>opt[sack_counter]))
+                            sack_counter+=4
+                        if len(sacks)>=2:
+                            packet_view[pkt_counter].sack1_le = sacks[0]
+                            packet_view[pkt_counter].sack1_re = sacks[1]
+                    opt += _opt.size
+                    opt_counter+= <int>_opt.size
+
+            
+            data  = <char *>packet + data_offset
+            data_len = (packet_length - data_offset)
 
             if data_len>1500:
                 data_len = 1500
